@@ -3,23 +3,18 @@
 # $Id$
 #
 
-import mailbox
-import rfc822
-import time
+import sys
+from pyPgSQL import PgSQL
+db = PgSQL
+from db_table_dict import db_table_dict
 
-print
+connection = db.connect('::mail')
 
-fp = open("mbox", "r")
-mb = mailbox.UnixMailbox(fp)
-while 1:
-	msg = mb.next()
-	if msg == None:
-		break
-	date = msg.getdate_tz("Date")
-	if date:
-		print time.strftime("%Y-%m-%d %H:%M:%S", date[0:9])
-		print date[9]
-		seconds = time.mktime(date[0:9])
-		seconds = seconds - date[9]
-		print time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds))
-		# If the local timezone changes between the call to mktime and the call to localtime then we'll get the wrong answer.  There's no timegm in Python 1.5.2!  RB 2000-10-07
+messages = db_table_dict(connection,
+                         "messages",
+                         ("message_id", "serial"),
+                         ("message_text", "text"))
+
+message_text = sys.stdin.read()
+
+messages.append(message_text)
