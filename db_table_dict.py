@@ -107,9 +107,10 @@ class db_table_dict:
     # argument are really the primary keys of the table, either.  Again,
     # read the comments to understand what will happen.
 
-    def __init__(self, connection, name, keys, values, create = 0):
+    def __init__(self, connection, name, keys, values, create = 0, auto_commit = 1):
 
         self.connection = connection
+        self.auto_commit = auto_commit
 
         def quote_ident(string):
             return '"' + string.replace('"', '""') + '"'
@@ -262,9 +263,9 @@ class db_table_dict:
             try:
                 cursor.execute(self.create_query)
             except:
-                self.connection.rollback()
+                if self.auto_commit: self.connection.rollback()
                 raise
-            self.connection.commit()
+            if self.auto_commit: self.connection.commit()
 
 
     # check_key -- Check the types and layout of a key argument
@@ -290,7 +291,7 @@ class db_table_dict:
         try:
             cursor.execute(self.get_query, key)
         except:
-            self.connection.rollback()
+            if self.auto_commit: self.connection.rollback()
             raise
         row = cursor.fetchone()
         if row != None:
@@ -311,7 +312,7 @@ class db_table_dict:
         try:
             cursor.execute(self.len_query)
         except:
-            self.connection.rollback()
+            if self.auto_commit: self.connection.rollback()
             raise
         row = cursor.fetchone()
         return int(row[0])
@@ -378,9 +379,9 @@ class db_table_dict:
             try:
                 cursor.execute(self.insert_query, key + value)
             except:
-                self.connection.rollback()
+                if self.auto_commit: self.connection.rollback()
                 raise
-            self.connection.commit()
+            if self.auto_commit: self.connection.commit()
             return x
         return row
 
@@ -413,16 +414,16 @@ class db_table_dict:
             try:
                 cursor.execute(self.insert_query, key + value)
             except:
-                self.connection.rollback()
+                if self.auto_commit: self.connection.rollback()
                 raise
-            self.connection.commit()
+            if self.auto_commit: self.connection.commit()
         elif row != value:
             try:
                 cursor.execute(self.update_query, key + value + key)
             except:
-                self.connection.rollback()
+                if self.auto_commit: self.connection.rollback()
                 raise
-            self.connection.commit()
+            if self.auto_commit: self.connection.commit()
 
 
     # __delitem__ -- delete rows matching key from the table
@@ -439,9 +440,9 @@ class db_table_dict:
         try:
             cursor.execute(self.delete_query, key)
         except:
-            self.connection.rollback()
+            if self.auto_commit: self.connection.rollback()
             raise
-        self.connection.commit()
+        if self.auto_commit: self.connection.commit()
 
 
     # has_key -- test whether any rows have key fields matching a key
@@ -633,9 +634,9 @@ class db_table_dict:
         try:
             cursor.execute(self.append_query, value)
         except:
-            self.connection.rollback()
+            if self.auto_commit: self.connection.rollback()
             raise
-        self.connection.commit()
+        if self.auto_commit: self.connection.commit()
 
 
     # index -- find smallest key for a value
@@ -653,7 +654,7 @@ class db_table_dict:
         try:
             cursor.execute(self.index_query, value)
         except:
-            self.connection.rollback()
+            if self.auto_commit: self.connection.rollback()
             raise
         row = cursor.fetchone()
         if row != None:
@@ -680,7 +681,7 @@ class db_table_dict:
         try:
             cursor.execute(self.count_query, value)
         except:
-            self.connection.rollback()
+            if self.auto_commit: self.connection.rollback()
             raise
         row = cursor.fetchone()
         return row[0]
@@ -744,6 +745,7 @@ class db_table_dict:
 # <mal@lemburg.com>; Python Database SIG <db-sig at python.org>; 1999-04-07;
 # <http://www.python.org/peps/pep-0249.html>.
 #
+#
 # B. DOCUMENT HISTORY
 #
 # 2004-01-22  RB  Created in the train from London to Cambridge.
@@ -759,6 +761,9 @@ class db_table_dict:
 # 2004-02-13  RB  Implemented almost everything a container, sequence, and
 #                 dictionary emulation should have according to the Python
 #                 reference and library reference manuals.
+#
+# 2004-02-18  RB  Added "auto_commit" parameter to allow supression of
+#                 commits and rollbacks.
 #
 #
 # C. COPYRIGHT AND LICENCE
