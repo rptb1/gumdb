@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+import sqlite3
+import pathlib
+import email
+import email.utils
+import email.parser
+import email.policy
+import uuid
+import mailbox
+
+def insert(conn, message_bytes):
+    # We'd like to use the "default" policy (which isn't the default)
+    # and take advantage of its structured header classes, but
+    # <https://bugs.python.org/issue35342> makes it unusable.
+    parser = email.parser.BytesParser(policy = email.policy.compat32)
+    message = parser.parsebytes(message_bytes, headersonly = True)
+
+    id = str(message['message-id'] or '<%s@gumdb>' % uuid.uuid4().hex).strip()
+    try:
+        conn.execute('INSERT INTO messages (id, message) VALUES (?, ?)', (id, message_bytes))
+    except sqlite3.IntegrityError as e:
+        if e.args[0] == 'UNIQUE constraint failed: messages.id':
+            cur = conn.cursor()
+            cur.execute('SELECT message FROM messages WHERE id = ?', (id,))
+            old_bytes = cur.fetchone()[0] 
+            # TODO: Proper error logging
+            if message_bytes == old_bytes:
+                print('WARNING: duplicate message with id %s' % id)
+            else:
+                print('ERROR: duplicate message id with different message %s' % id)
+        else:
+            raise
+
+    conn.executemany('INSERT INTO headers (id, name, value) VALUES (?, ?, ?)',
+                     [(id, name.lower(), value) for name, value in message.items()])
+
+    values = []
+    for header in ['to', 'from', 'cc', 'bcc', 'resent-to', 'resent-from',
+                   'sender', 'resent-sender', 'reply-to']:
+        addresses = email.utils.getaddresses(message.get_all(header) or ())
+        for name, address in addresses:
+            if address != '':
+                values.append((id, header, name, address))
+    conn.executemany('INSERT INTO addresses (id, header, name, address) VALUES (?, ?, ?, ?)', values)
+
+    values = []
+    for header in ['date', 'resent-date', 'orig-date']:
+        for value in (message.get_all(header) or ()):
+            try:
+                # TODO: Docs don't say what date.datetime is if the
+                # header isn't parseable.  It seems to just break in
+                # undocumented ways.
+                values.append((id, header, email.utils.parsedate_to_datetime(value)))
+            except:
+                pass
+    conn.executemany('INSERT INTO dates (id, header, date) VALUES (?, ?, ?)', values)
+
+    conn.commit()
+
+def schema(conn):
+    try:
+        conn.execute('CREATE TABLE messages (id TEXT PRIMARY KEY, message BLOB)')
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute('CREATE TABLE headers (id TEXT, name TEXT, value TEXT)')
+    except sqlite3.OperationalError:
+        pass
+    conn.execute('CREATE INDEX IF NOT EXISTS headers_id ON headers (id)')
+
+    try:
+        conn.execute('''
+            CREATE TABLE addresses (
+                id TEXT,
+                header TEXT,
+                name TEXT,
+                address TEXT
+            )
+        ''')
+    except sqlite3.OperationalError:
+        pass
+    conn.execute('CREATE INDEX IF NOT EXISTS addresses_id on addresses (id)')
+
+    try:
+        conn.execute('''
+            CREATE TABLE dates (
+                id TEXT,
+                header TEXT,
+                date TEXT
+            )
+        ''')
+    except sqlite3.OperationalError:
+        pass
+    conn.execute('CREATE INDEX IF NOT EXISTS dates_id on dates (id)')
+    
+def main():
+    parser = argparse.ArgumentParser(description = 'Insert a new email message into the GUMDB.')
+    parser.add_argument('--database',
+                        nargs = 1,
+                        default = pathlib.Path.home() / 'var/gumdb.sqlite3',
+                        help = 'path to database file')
+    parser.add_argument('--mbox',
+                        action = 'store_const',
+                        const = True,
+                        default = False,
+                        help = 'accept a mailbox of messages in mbox format')
+    parser.add_argument('file',
+                        nargs = '+',
+                        help = 'one or more files from which to read messages')
+    args = parser.parse_args()
+
+    conn = sqlite3.connect(str(args.database))
+    schema(conn)
+
+    for file in args.file:
+        if args.mbox:
+            box = mailbox.mbox(file, create = False)
+            for key in box.iterkeys():
+                insert(conn, box.get_bytes(key))
+                print('.', end='')
+            print()
+        else:
+            if file == '-':
+                message_bytes = stdin.buffer.read()
+            else:
+                message_bytes = open(file, 'rb').read()
+            insert(conn, message_bytes)
+
+if __name__ == '__main__':
+    main()
