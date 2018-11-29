@@ -26,20 +26,17 @@ def main():
     except sqlite3.OperationalError:
         pass
 
+    # CREATE INDEX digest_digests ON digests (digest);
+
     try:
         conn.execute('''
             CREATE VIEW duplicates AS
-                SELECT *
-                FROM (SELECT headers.value, digests.digest
-                      FROM headers
-                      JOIN digests USING(id)
-                      WHERE headers.name = 'message-id'
-                      GROUP BY headers.value, digest
+                SELECT id, digest
+                FROM (SELECT digest
+                      FROM digests
+                      GROUP BY digest
                       HAVING count(*) > 1)
                 LEFT JOIN digests USING (digest)
-                LEFT JOIN headers USING (id, value)
-                JOIN messages using (id)
-                WHERE headers.name = 'message-id'
         ''')
     except sqlite3.OperationalError:
         pass
@@ -47,7 +44,7 @@ def main():
     cur = conn.cursor()
     # Find all messages with the same value in their Message-Id header.
     cur.execute('''
-        SELECT id, message, source
+        SELECT id, message, source, headers.value
         FROM (SELECT value
               FROM headers
               WHERE name = 'message-id'
@@ -60,10 +57,15 @@ def main():
               digests.digest IS NULL
     ''')
     parser = email.parser.BytesParser(policy = email.policy.compat32)
-    for id, message, source in fetch(cur):
-        digest = pyzor.digest.DataDigester(parser.parsebytes(message)).value
-        print(id, digest, source)
-        conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, digest))
+    for id, message, source, message_id in fetch(cur):
+        digest = pyzor.digest.DataDigester(parser.parsebytes(message)).digest
+        # Pyzor's digest doesn't include the Message-Id.  We want to
+        # distinguish identical messages with different Message-Ids,
+        # so add that to the digest.
+        digest.update(message_id.encode('utf-8'))
+        hex = digest.hexdigest()
+        print(id, hex, source)
+        conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
         conn.commit()
 
 if __name__ == '__main__':
