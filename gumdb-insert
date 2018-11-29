@@ -10,58 +10,54 @@ import email.policy
 import uuid
 import mailbox
 
-def insert(conn, message_bytes):
+def insert(conn, message_bytes, source=None):
     # We'd like to use the "default" policy (which isn't the default)
     # and take advantage of its structured header classes, but
     # <https://bugs.python.org/issue35342> makes it unusable.
     parser = email.parser.BytesParser(policy = email.policy.compat32)
     message = parser.parsebytes(message_bytes, headersonly = True)
 
-    id = str(message['message-id'] or '<%s@gumdb>' % uuid.uuid4().hex).strip()
-    try:
-        conn.execute('INSERT INTO messages (id, message) VALUES (?, ?)', (id, message_bytes))
-    except sqlite3.IntegrityError as e:
-        if e.args[0] == 'UNIQUE constraint failed: messages.id':
-            cur = conn.cursor()
-            cur.execute('SELECT message FROM messages WHERE id = ?', (id,))
-            old_bytes = cur.fetchone()[0] 
-            # TODO: Proper error logging
-            if message_bytes == old_bytes:
-                print('WARNING: duplicate message with id %s' % id)
-            else:
-                print('ERROR: duplicate message id with different message %s' % id)
-        else:
-            raise
+    id = uuid.uuid4().hex
+    conn.execute('INSERT INTO messages (id, message, source) VALUES (?, ?, ?)', (id, message_bytes, source))
 
     conn.executemany('INSERT INTO headers (id, name, value) VALUES (?, ?, ?)',
-                     [(id, name.lower(), value) for name, value in message.items()])
+                     [(id, name.lower(), str(value)) for name, value in message.items()])
 
+    # See
+    # <https://docs.python.org/3.7/library/email.headerregistry.html#email.headerregistry.HeaderRegistry>
+    # for the origin of this list of headers.
     values = []
     for header in ['to', 'from', 'cc', 'bcc', 'resent-to', 'resent-from',
                    'sender', 'resent-sender', 'reply-to']:
-        addresses = email.utils.getaddresses(message.get_all(header) or ())
+        addresses = email.utils.getaddresses([str(h) for h in (message.get_all(header) or ())])
         for name, address in addresses:
             if address != '':
                 values.append((id, header, name, address))
     conn.executemany('INSERT INTO addresses (id, header, name, address) VALUES (?, ?, ?, ?)', values)
 
+    # See
+    # <https://docs.python.org/3.7/library/email.headerregistry.html#email.headerregistry.HeaderRegistry>
+    # for the origin of this list of headers.
     values = []
     for header in ['date', 'resent-date', 'orig-date']:
         for value in (message.get_all(header) or ()):
             try:
                 # TODO: Docs don't say what date.datetime is if the
                 # header isn't parseable.  It seems to just break in
-                # undocumented ways.
+                # undocumented ways.  See
+                # <https://bugs.python.org/issue30681>.
                 values.append((id, header, email.utils.parsedate_to_datetime(value)))
             except:
                 pass
     conn.executemany('INSERT INTO dates (id, header, date) VALUES (?, ?, ?)', values)
 
+    conn.execute('INSERT INTO envelopes (id, unixfrom) VALUES (?, ?)', (id, message.get_unixfrom()))
+
     conn.commit()
 
 def schema(conn):
     try:
-        conn.execute('CREATE TABLE messages (id TEXT PRIMARY KEY, message BLOB)')
+        conn.execute('CREATE TABLE messages (id TEXT PRIMARY KEY, message BLOB, source TEXT)')
     except sqlite3.OperationalError:
         pass
 
@@ -95,6 +91,11 @@ def schema(conn):
     except sqlite3.OperationalError:
         pass
     conn.execute('CREATE INDEX IF NOT EXISTS dates_id on dates (id)')
+
+    try:
+        conn.execute('CREATE TABLE envelopes (id TEXT PRIMARY KEY, unixfrom TEXT)')
+    except sqlite3.OperationalError:
+        pass
     
 def main():
     parser = argparse.ArgumentParser(description = 'Insert a new email message into the GUMDB.')
@@ -107,11 +108,17 @@ def main():
                         const = True,
                         default = False,
                         help = 'accept a mailbox of messages in mbox format')
+    parser.add_argument('--dots',
+                        action = 'store_const',
+                        const = True,
+                        default = False,
+                        help = 'print one dot per message to standard output to show progress')
     parser.add_argument('file',
                         nargs = '+',
                         help = 'one or more files from which to read messages')
     args = parser.parse_args()
 
+    # TODO: Make sure it's not autocommit
     conn = sqlite3.connect(str(args.database))
     schema(conn)
 
@@ -119,15 +126,14 @@ def main():
         if args.mbox:
             box = mailbox.mbox(file, create = False)
             for key in box.iterkeys():
-                insert(conn, box.get_bytes(key))
-                print('.', end='')
-            print()
+                insert(conn, box.get_bytes(key, from_ = True), source = repr((file, key)))
+                if args.dots: print('.', end = '', flush = True)
+            if args.dots: print(flush = True)
         else:
             if file == '-':
-                message_bytes = stdin.buffer.read()
+                insert(conn, sys.stdin.buffer.read(), source = 'stdin')
             else:
-                message_bytes = open(file, 'rb').read()
-            insert(conn, message_bytes)
+                insert(conn, open(file, 'rb').read(), source = file)
 
 if __name__ == '__main__':
     main()
