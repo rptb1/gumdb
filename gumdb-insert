@@ -51,48 +51,53 @@ def insert(conn, message_bytes, source=None):
                 pass
     conn.executemany('INSERT INTO dates (id, header, date) VALUES (?, ?, ?)', values)
 
-    conn.execute('INSERT INTO envelopes (id, unixfrom) VALUES (?, ?)', (id, message.get_unixfrom()))
+    unixfrom = message.get_unixfrom()
+    if unixfrom:
+        conn.execute('INSERT INTO envelopes (id, unixfrom) VALUES (?, ?)', (id, unixfrom))
 
     conn.commit()
 
 def schema(conn):
+    # WITHOUT ROWID is possible for the messages table, but not
+    # recommended because it has large rows.  See
+    # <https://sqlite.org/withoutrowid.html>.
     conn.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
-            message BLOB,
+            message BLOB NOT NULL,
             source TEXT
         )
     ''')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS headers (
-            id TEXT,
-            name TEXT,
-            value TEXT
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            value TEXT NOT NULL
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS headers_id ON headers (id)')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS addresses (
-            id TEXT,
-            header TEXT,
+            id TEXT NOT NULL,
+            header TEXT NOT NULL,
             name TEXT,
-            address TEXT
+            address TEXT NOT NULL
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS addresses_id on addresses (id)')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS dates (
-            id TEXT,
-            header TEXT,
-            date TEXT
+            id TEXT NOT NULL,
+            header TEXT NOT NULL,
+            date TEXT NOT NULL
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS dates_id on dates (id)')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS envelopes (
             id TEXT PRIMARY KEY,
-            unixfrom TEXT
-        )
+            unixfrom TEXT NOT NULL
+        ) WITHOUT ROWID
     ''')
     
 def main():
