@@ -10,7 +10,7 @@ import email.policy
 import uuid
 import mailbox
 
-def insert(conn, message_bytes, source=None):
+def insert(conn, message_bytes, source = None):
     # We'd like to use the "default" policy (which isn't the default)
     # and take advantage of its structured header classes, but
     # <https://bugs.python.org/issue35342> makes it unusable.
@@ -18,7 +18,18 @@ def insert(conn, message_bytes, source=None):
     message = parser.parsebytes(message_bytes, headersonly = True)
 
     id = uuid.uuid4().hex
-    conn.execute('INSERT INTO messages (id, message, source) VALUES (?, ?, ?)', (id, message_bytes, source))
+    conn.execute('INSERT INTO messages (id, message) VALUES (?, ?)', (id, message_bytes))
+
+    if source:
+        source['id'] = id
+        fields = ['id', 'type', 'file', 'key', 'mtime']
+        conn.execute(
+            f'''
+               INSERT INTO sources ({','.join(fields)})
+               VALUES ({','.join(':'+f for f in fields)})
+            ''',
+            {f:source.get(f) for f in fields}
+        )
 
     conn.executemany('INSERT INTO headers (id, name, value) VALUES (?, ?, ?)',
                      [(id, name.lower(), str(value)) for name, value in message.items()])
@@ -66,6 +77,15 @@ def schema(conn):
             id TEXT PRIMARY KEY NOT NULL,
             message BLOB NOT NULL,
             source TEXT
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS sources (
+            id TEXT PRIMARY KEY NOT NULL,
+            type TEXT NOT NULL,
+            file TEXT,
+            key TEXT,
+            mtime FLOAT
         )
     ''')
     conn.execute('''
@@ -134,14 +154,16 @@ def main():
                 # where the message came from, even if the mailbox
                 # changes. TODO: Remember the this is an mbox file, so
                 # that we can have others.
-                insert(conn, box.get_bytes(key, from_ = True), source = repr((file, key)))
+                insert(conn,
+                       box.get_bytes(key, from_ = True),
+                       source = dict(type = 'mbox', file = file, key = key))
                 if args.dots: print('.', end = '', flush = True)
             if args.dots: print(flush = True)
         else:
             if file == '-':
-                insert(conn, sys.stdin.buffer.read(), source = 'stdin')
+                insert(conn, sys.stdin.buffer.read(), source = dict(type = 'file'))
             else:
-                insert(conn, open(file, 'rb').read(), source = file)
+                insert(conn, open(file, 'rb').read(), source = dict(type = 'file', file = file))
 
 if __name__ == '__main__':
     main()
