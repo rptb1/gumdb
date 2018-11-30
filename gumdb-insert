@@ -63,7 +63,7 @@ def schema(conn):
     # <https://sqlite.org/withoutrowid.html>.
     conn.execute('''
         CREATE TABLE IF NOT EXISTS messages (
-            id TEXT PRIMARY KEY,
+            id TEXT PRIMARY KEY NOT NULL,
             message BLOB NOT NULL,
             source TEXT
         )
@@ -95,7 +95,7 @@ def schema(conn):
     conn.execute('CREATE INDEX IF NOT EXISTS dates_id on dates (id)')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS envelopes (
-            id TEXT PRIMARY KEY,
+            id TEXT PRIMARY KEY NOT NULL,
             unixfrom TEXT NOT NULL
         ) WITHOUT ROWID
     ''')
