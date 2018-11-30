@@ -42,9 +42,11 @@ def main():
         pass
         
     cur = conn.cursor()
-    # Find all messages with the same value in their Message-Id header.
+    # Find all messages with the same value in their Message-Id
+    # header.  DISTINCT is necesssary because there are messages with
+    # multiple identical Message-Id headers in my archive!
     cur.execute('''
-        SELECT id, message, source, headers.value
+        SELECT DISTINCT id, message, source, headers.value
         FROM (SELECT value
               FROM headers
               WHERE name = 'message-id'
