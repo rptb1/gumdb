@@ -75,8 +75,7 @@ def schema(conn):
     conn.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY NOT NULL,
-            message BLOB NOT NULL,
-            source TEXT
+            message BLOB NOT NULL
         )
     ''')
     conn.execute('''
