@@ -9,6 +9,8 @@ import email.parser
 import email.policy
 import uuid
 import mailbox
+import os.path
+import time
 
 def insert(conn, message_bytes, source = None):
     # We'd like to use the "default" policy (which isn't the default)
@@ -78,43 +80,73 @@ def schema(conn):
             message BLOB NOT NULL
         )
     ''')
+
     conn.execute('''
         CREATE TABLE IF NOT EXISTS sources (
-            id TEXT PRIMARY KEY NOT NULL,
+            id TEXT
+                PRIMARY KEY
+                NOT NULL
+                REFERENCES messages(id)
+                ON DELETE CASCADE,
             type TEXT NOT NULL,
             file TEXT,
             key TEXT,
             mtime FLOAT
         )
     ''')
+
+    # headers.id can't be a primary key because messages have more
+    # than one header.  (headers.id, headers.name) can't be a primary
+    # key because messages can have more than one header with the same
+    # name (and possibly even the same value).  So the headers table
+    # is a real bag, not a set.
     conn.execute('''
         CREATE TABLE IF NOT EXISTS headers (
-            id TEXT NOT NULL,
+            id TEXT
+              NOT NULL
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
             name TEXT NOT NULL,
             value TEXT NOT NULL
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS headers_id ON headers (id)')
+
+    # (addresses.id, addresses.header) can't be a primary key because
+    # messages may have more than one address header with the same
+    # name (and value), e.g. Two "To" headers.
     conn.execute('''
         CREATE TABLE IF NOT EXISTS addresses (
-            id TEXT NOT NULL,
+            id TEXT
+              NOT NULL
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
             header TEXT NOT NULL,
             name TEXT,
             address TEXT NOT NULL
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS addresses_id on addresses (id)')
+
     conn.execute('''
         CREATE TABLE IF NOT EXISTS dates (
-            id TEXT NOT NULL,
+            id TEXT
+              NOT NULL
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
             header TEXT NOT NULL,
             date TEXT NOT NULL
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS dates_id on dates (id)')
+
     conn.execute('''
         CREATE TABLE IF NOT EXISTS envelopes (
-            id TEXT PRIMARY KEY NOT NULL,
+            id TEXT
+              NOT NULL
+              PRIMARY KEY
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
             unixfrom TEXT NOT NULL
         ) WITHOUT ROWID
     ''')
@@ -123,7 +155,7 @@ def main():
     parser = argparse.ArgumentParser(description = 'Insert a new email message into the GUMDB.')
     parser.add_argument('--database',
                         nargs = 1,
-                        default = pathlib.Path.home() / 'var/gumdb.sqlite3',
+                        default = [pathlib.Path.home() / 'var/gumdb.sqlite3'],
                         help = 'path to database file')
     parser.add_argument('--mbox',
                         action = 'store_const',
@@ -142,27 +174,40 @@ def main():
 
     # TODO: Make sure it's not autocommit
     conn = sqlite3.connect(str(args.database[0]), timeout=60)
+    # See <https://sqlite.org/foreignkeys.html>.
+    if conn.execute('PRAGMA foreign_keys'):
+        conn.execute('PRAGMA foreign_keys = ON')
+    else:
+        # TODO: Proper warning output
+        print('WARNING: foreign keys not supported in sqlite3. Database may accumulate cruft.')
     schema(conn)
 
     for file in args.file:
         if args.mbox:
             box = mailbox.mbox(file, create = False)
+            # TODO: locking?
+            mtime = os.path.getmtime(file)
             for key in box.iterkeys():
-                # TODO: Store the modification time of the source
-                # file, so that we have a permanent unique idea of
-                # where the message came from, even if the mailbox
-                # changes. TODO: Remember the this is an mbox file, so
-                # that we can have others.
                 insert(conn,
                        box.get_bytes(key, from_ = True),
-                       source = dict(type = 'mbox', file = file, key = key))
+                       source = dict(type = 'mbox',
+                                     file = file,
+                                     key = key,
+                                     mtime = mtime))
                 if args.dots: print('.', end = '', flush = True)
             if args.dots: print(flush = True)
         else:
             if file == '-':
-                insert(conn, sys.stdin.buffer.read(), source = dict(type = 'file'))
+                insert(conn,
+                       sys.stdin.buffer.read(),
+                       source = dict(type = 'file',
+                                     mtime = time.time()))
             else:
-                insert(conn, open(file, 'rb').read(), source = dict(type = 'file', file = file))
+                insert(conn,
+                       open(file, 'rb').read(),
+                       source = dict(type = 'file',
+                                     file = file,
+                                     mtime = os.path.getmtime(file)))
 
 if __name__ == '__main__':
     main()
