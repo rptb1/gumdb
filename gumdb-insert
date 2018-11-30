@@ -56,46 +56,44 @@ def insert(conn, message_bytes, source=None):
     conn.commit()
 
 def schema(conn):
-    try:
-        conn.execute('CREATE TABLE messages (id TEXT PRIMARY KEY, message BLOB, source TEXT)')
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        conn.execute('CREATE TABLE headers (id TEXT, name TEXT, value TEXT)')
-    except sqlite3.OperationalError:
-        pass
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            message BLOB,
+            source TEXT
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS headers (
+            id TEXT,
+            name TEXT,
+            value TEXT
+        )
+    ''')
     conn.execute('CREATE INDEX IF NOT EXISTS headers_id ON headers (id)')
-
-    try:
-        conn.execute('''
-            CREATE TABLE addresses (
-                id TEXT,
-                header TEXT,
-                name TEXT,
-                address TEXT
-            )
-        ''')
-    except sqlite3.OperationalError:
-        pass
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS addresses (
+            id TEXT,
+            header TEXT,
+            name TEXT,
+            address TEXT
+        )
+    ''')
     conn.execute('CREATE INDEX IF NOT EXISTS addresses_id on addresses (id)')
-
-    try:
-        conn.execute('''
-            CREATE TABLE dates (
-                id TEXT,
-                header TEXT,
-                date TEXT
-            )
-        ''')
-    except sqlite3.OperationalError:
-        pass
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS dates (
+            id TEXT,
+            header TEXT,
+            date TEXT
+        )
+    ''')
     conn.execute('CREATE INDEX IF NOT EXISTS dates_id on dates (id)')
-
-    try:
-        conn.execute('CREATE TABLE envelopes (id TEXT PRIMARY KEY, unixfrom TEXT)')
-    except sqlite3.OperationalError:
-        pass
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS envelopes (
+            id TEXT PRIMARY KEY,
+            unixfrom TEXT
+        )
+    ''')
     
 def main():
     parser = argparse.ArgumentParser(description = 'Insert a new email message into the GUMDB.')
@@ -119,7 +117,7 @@ def main():
     args = parser.parse_args()
 
     # TODO: Make sure it's not autocommit
-    conn = sqlite3.connect(str(args.database), timeout=60)
+    conn = sqlite3.connect(str(args.database[0]), timeout=60)
     schema(conn)
 
     for file in args.file:
