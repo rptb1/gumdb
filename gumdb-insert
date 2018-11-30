@@ -119,13 +119,18 @@ def main():
     args = parser.parse_args()
 
     # TODO: Make sure it's not autocommit
-    conn = sqlite3.connect(str(args.database))
+    conn = sqlite3.connect(str(args.database), timeout=60)
     schema(conn)
 
     for file in args.file:
         if args.mbox:
             box = mailbox.mbox(file, create = False)
             for key in box.iterkeys():
+                # TODO: Store the modification time of the source
+                # file, so that we have a permanent unique idea of
+                # where the message came from, even if the mailbox
+                # changes. TODO: Remember the this is an mbox file, so
+                # that we can have others.
                 insert(conn, box.get_bytes(key, from_ = True), source = repr((file, key)))
                 if args.dots: print('.', end = '', flush = True)
             if args.dots: print(flush = True)
