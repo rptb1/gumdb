@@ -22,34 +22,32 @@ def main():
         # TODO: Proper warning output
         print('WARNING: foreign keys not supported in sqlite3. Database may accumulate cruft.')
 
-    try:
-        conn.execute('''
-            CREATE TABLE digests (
-                id TEXT
-                    NOT NULL
-                    PRIMARY KEY
-                    REFERENCES messages (id)
-                    ON DELETE CASCADE,
-                digest TEXT NOT NULL
-            )
-        ''')
-    except sqlite3.OperationalError:
-        pass
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS digests (
+            id TEXT
+                NOT NULL
+                PRIMARY KEY
+                REFERENCES messages (id)
+                ON DELETE CASCADE,
+            digest TEXT NOT NULL
+        )
+    ''')
 
-    # CREATE INDEX digest_digests ON digests (digest);
-
-    try:
-        conn.execute('''
-            CREATE VIEW duplicates AS
-                SELECT id, digest
-                FROM (SELECT digest
-                      FROM digests
-                      GROUP BY digest
-                      HAVING count(*) > 1)
-                LEFT JOIN digests USING (digest)
-        ''')
-    except sqlite3.OperationalError:
-        pass
+    conn.execute('''
+        CREATE VIEW IF NOT EXISTS duplicates AS
+            SELECT id, digest
+            FROM (SELECT digest
+                  FROM digests
+                  GROUP BY digest
+                  HAVING count(*) > 1)
+            LEFT JOIN digests USING (digest)
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS digest_digests ON digests (digest)
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS headers_message_ids ON headers (value) WHERE name = 'message-id'
+    ''')
         
     cur = conn.cursor()
     # Find all messages with the same value in their Message-Id
