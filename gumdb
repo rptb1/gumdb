@@ -18,6 +18,8 @@ import time
 import uuid
 
 logger = logging.getLogger("gumdb")
+logger.setLevel(logging.WARNING)
+logger.addHandler(logging.StreamHandler())
 
 
 def schema(conn):
@@ -163,6 +165,11 @@ def insert_message(conn, message_bytes, source = None):
     # <https://bugs.python.org/issue35342> makes it unusable.
     parser = email.parser.BytesParser(policy = email.policy.compat32)
     message = parser.parsebytes(message_bytes, headersonly = True)
+
+    logger.info('Adding message from %s date %s subject %s',
+                repr(str(message['from'])),
+                repr(str(message['date'])),
+                repr(str(message['subject'])))
 
     id = uuid.uuid4().hex
     conn.execute('INSERT INTO messages (id, message) VALUES (?, ?)', (id, message_bytes))
@@ -312,6 +319,12 @@ def main():
                         nargs = 1,
                         default = [default_database],
                         help = 'path to database file (default: %s)' % default_database)
+    parser.add_argument('-d', '--debug',
+                        action = 'store_true',
+                        help = 'enable debugging output (logging level DEBUG)')
+    parser.add_argument('-v', '--verbose',
+                        action = 'store_true',
+                        help = 'enable verbose output (logging level INFO)')
     parser.add_argument('command',
                         metavar = '<command>',
                         help = ', '.join(commands.keys()))
@@ -320,6 +333,11 @@ def main():
                         nargs = argparse.REMAINDER,
                         help = 'Pass --help to each command for detailed help.')
     args = parser.parse_args()
+    if args.verbose:
+        logger.setLevel(logging.INFO)
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+    logger.debug('Debug logging enabled')
     prefix = re.sub(r'(?ims)\Ausage: (.*?) <command>.*\Z', r'\1', parser.format_usage())
     try:
         commands[args.command](args, prefix = prefix)
