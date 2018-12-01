@@ -181,7 +181,7 @@ def insert_message(conn, message_bytes, source = None):
     # and take advantage of its structured header classes, but
     # <https://bugs.python.org/issue35342> makes it unusable.
     parser = email.parser.BytesParser(policy = email.policy.compat32)
-    message = parser.parsebytes(message_bytes, headersonly = True)
+    message = parser.parsebytes(message_bytes)
 
     logger.info('Adding message from %s date %s subject %s',
                 repr(str(message['from'])),
