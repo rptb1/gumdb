@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Grand Unified Mail Database"""
+
+import argparse
+import email
+import email.parser
+import email.policy
+import email.utils
+import logging
+import mailbox
+import os.path
+import pathlib
+import re
+import sqlite3
+import sys
+import time
+import uuid
+
+logger = logging.getLogger("gumdb")
+
+
+def schema(conn):
+    # WITHOUT ROWID is possible for the messages table, but not
+    # recommended because it has large rows.  See
+    # <https://sqlite.org/withoutrowid.html>.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            message BLOB NOT NULL
+        )
+    ''')
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS sources (
+            id TEXT
+                PRIMARY KEY
+                NOT NULL
+                REFERENCES messages(id)
+                ON DELETE CASCADE,
+            type TEXT NOT NULL,
+            file TEXT,
+            key TEXT,
+            mtime FLOAT
+        )
+    ''')
+
+    # headers.id can't be a primary key because messages have more
+    # than one header.  (headers.id, headers.name) can't be a primary
+    # key because messages can have more than one header with the same
+    # name (and possibly even the same value).  So the headers table
+    # is a real bag, not a set.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS headers (
+            id TEXT
+              NOT NULL
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            value TEXT NOT NULL
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS headers_id ON headers (id)')
+
+    # (addresses.id, addresses.header) can't be a primary key because
+    # messages may have more than one address header with the same
+    # name (and value), e.g. Two "To" headers.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS addresses (
+            id TEXT
+              NOT NULL
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
+            header TEXT NOT NULL,
+            name TEXT,
+            address TEXT NOT NULL
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS addresses_id on addresses (id)')
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS dates (
+            id TEXT
+              NOT NULL
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
+            header TEXT NOT NULL,
+            date TEXT NOT NULL
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS dates_id on dates (id)')
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS envelopes (
+            id TEXT
+              NOT NULL
+              PRIMARY KEY
+              REFERENCES messages(id)
+              ON DELETE CASCADE,
+            unixfrom TEXT NOT NULL
+        ) WITHOUT ROWID
+    ''')
+
+
+def connect(path):
+    # TODO: Make sure it's not autocommit
+    conn = sqlite3.connect(path, timeout=60)
+    # See <https://sqlite.org/foreignkeys.html>.
+    if conn.execute('PRAGMA foreign_keys'):
+        conn.execute('PRAGMA foreign_keys = ON')
+    else:
+        logger.warn('Foreign keys not supported in sqlite3. Database may accumulate cruft.')
+    schema(conn)
+    return conn
+
+
+def insert_message(conn, message_bytes, source = None):
+    # We'd like to use the "default" policy (which isn't the default)
+    # and take advantage of its structured header classes, but
+    # <https://bugs.python.org/issue35342> makes it unusable.
+    parser = email.parser.BytesParser(policy = email.policy.compat32)
+    message = parser.parsebytes(message_bytes, headersonly = True)
+
+    id = uuid.uuid4().hex
+    conn.execute('INSERT INTO messages (id, message) VALUES (?, ?)', (id, message_bytes))
+
+    if source:
+        source['id'] = id
+        fields = ['id', 'type', 'file', 'key', 'mtime']
+        conn.execute(
+            f'''
+               INSERT INTO sources ({','.join(fields)})
+               VALUES ({','.join(':'+f for f in fields)})
+            ''',
+            {f:source.get(f) for f in fields}
+        )
+
+    conn.executemany('INSERT INTO headers (id, name, value) VALUES (?, ?, ?)',
+                     [(id, name.lower(), str(value)) for name, value in message.items()])
+
+    # See
+    # <https://docs.python.org/3.7/library/email.headerregistry.html#email.headerregistry.HeaderRegistry>
+    # for the origin of this list of headers.
+    values = []
+    for header in ['to', 'from', 'cc', 'bcc', 'resent-to', 'resent-from',
+                   'sender', 'resent-sender', 'reply-to']:
+        addresses = email.utils.getaddresses([str(h) for h in (message.get_all(header) or ())])
+        for name, address in addresses:
+            if address != '':
+                values.append((id, header, name, address))
+    conn.executemany('INSERT INTO addresses (id, header, name, address) VALUES (?, ?, ?, ?)', values)
+
+    # See
+    # <https://docs.python.org/3.7/library/email.headerregistry.html#email.headerregistry.HeaderRegistry>
+    # for the origin of this list of headers.
+    values = []
+    for header in ['date', 'resent-date', 'orig-date']:
+        for value in (message.get_all(header) or ()):
+            try:
+                # TODO: Docs don't say what date.datetime is if the
+                # header isn't parseable.  It seems to just break in
+                # undocumented ways.  See
+                # <https://bugs.python.org/issue30681>.
+                values.append((id, header, email.utils.parsedate_to_datetime(value)))
+            except:
+                pass
+    conn.executemany('INSERT INTO dates (id, header, date) VALUES (?, ?, ?)', values)
+
+    unixfrom = message.get_unixfrom()
+    if unixfrom:
+        conn.execute('INSERT INTO envelopes (id, unixfrom) VALUES (?, ?)', (id, unixfrom))
+
+    conn.commit()
+
+
+def insert(args, prefix = 'gumdb'):
+    parser = argparse.ArgumentParser(prog = prefix + ' insert',
+                                     description = 'Insert a new email message into the GUMDB.')
+    parser.add_argument('--mbox',
+                        action = 'store_true',
+                        help = 'accept a mailbox of messages in mbox format')
+    parser.add_argument('--dots',
+                        action = 'store_true',
+                        help = 'print one dot per message to standard output to show progress')
+    parser.add_argument('path',
+                        metavar = '<path>',
+                        nargs = '+',
+                        help = 'one or more files from which to read messages')
+    insert_args = parser.parse_args(args.arguments)
+    print(repr(insert_args))
+    conn = connect(str(args.database[0]))
+    for path in insert_args.path:
+        if insert_args.mbox:
+            box = mailbox.mbox(path, create = False)
+            # TODO: locking?
+            mtime = os.path.getmtime(path)
+            for key in box.iterkeys():
+                insert_message(conn,
+                               box.get_bytes(key, from_ = True),
+                               source = dict(type = 'mbox',
+                                             file = path,
+                                             key = key,
+                                             mtime = mtime))
+                if insert_args.dots: print('.', end = '', flush = True)
+            if insert_args.dots: print(flush = True)
+        else:
+            if path == '-':
+                insert_message(conn,
+                               sys.stdin.buffer.read(),
+                               source = dict(type = 'file',
+                                             mtime = time.time()))
+            else:
+                insert_message(conn,
+                               open(path, 'rb').read(),
+                               source = dict(type = 'file',
+                                             file = path,
+                                             mtime = os.path.getmtime(path)))
+
+
+def main():
+    commands = {
+        'help': lambda args, prefix = 'help': parser.print_help(),
+        'insert': insert
+    }
+    parser = argparse.ArgumentParser(description = 'Grand Unified Mail Database')
+    default_database = pathlib.Path.home() / 'var/gumdb.sqlite3'
+    parser.add_argument('-f', '--database',
+                        nargs = 1,
+                        default = [default_database],
+                        help = 'path to database file (default: %s)' % default_database)
+    parser.add_argument('command',
+                        metavar = '<command>',
+                        help = ', '.join(commands.keys()))
+    parser.add_argument('arguments',
+                        metavar = '...',
+                        nargs = argparse.REMAINDER,
+                        help = 'Pass --help to each command for detailed help.')
+    args = parser.parse_args()
+    prefix = re.sub(r'(?ims)\Ausage: (.*?) <command>.*\Z', r'\1', parser.format_usage())
+    try:
+        commands[args.command](args, prefix = prefix)
+    except KeyError:
+        logger.error('Unknown command %s' % repr(args.command))
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
