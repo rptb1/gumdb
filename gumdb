@@ -10,6 +10,7 @@ import logging
 import mailbox
 import os.path
 import pathlib
+import pyzor.digest
 import re
 import sqlite3
 import sys
@@ -20,6 +21,9 @@ logger = logging.getLogger("gumdb")
 
 
 def schema(conn):
+    
+    # Core schema
+    
     # WITHOUT ROWID is possible for the messages table, but not
     # recommended because it has large rows.  See
     # <https://sqlite.org/withoutrowid.html>.
@@ -100,8 +104,38 @@ def schema(conn):
         ) WITHOUT ROWID
     ''')
 
+    # Digestify schema
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS digests (
+            id TEXT
+                NOT NULL
+                PRIMARY KEY
+                REFERENCES messages (id)
+                ON DELETE CASCADE,
+            digest TEXT NOT NULL
+        )
+    ''')
+
+    conn.execute('''
+        CREATE VIEW IF NOT EXISTS duplicates AS
+            SELECT id, digest
+            FROM (SELECT digest
+                  FROM digests
+                  GROUP BY digest
+                  HAVING count(*) > 1)
+            LEFT JOIN digests USING (digest)
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS digest_digests ON digests (digest)
+    ''')
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS headers_message_ids ON headers (value) WHERE name = 'message-id'
+    ''')
+
 
 def connect(path):
+    """Connect to sqlite database with required settings and ensure schema is present."""
     # TODO: Make sure it's not autocommit
     conn = sqlite3.connect(path, timeout=60)
     # See <https://sqlite.org/foreignkeys.html>.
@@ -113,7 +147,17 @@ def connect(path):
     return conn
 
 
+def fetch(cursor):
+    """Convert a cursor into an iterator."""
+    while True:
+        rows = cursor.fetchmany()
+        if not rows: return
+        yield from rows
+
+
 def insert_message(conn, message_bytes, source = None):
+    """Insert a single message into the database."""
+    
     # We'd like to use the "default" policy (which isn't the default)
     # and take advantage of its structured header classes, but
     # <https://bugs.python.org/issue35342> makes it unusable.
@@ -173,8 +217,9 @@ def insert_message(conn, message_bytes, source = None):
 
 
 def insert(args, prefix = 'gumdb'):
+    """Insert messages into the database from the command line."""
     parser = argparse.ArgumentParser(prog = prefix + ' insert',
-                                     description = 'Insert a new email message into the GUMDB.')
+                                     description = 'Insert email messages into the database.')
     parser.add_argument('--mbox',
                         action = 'store_true',
                         help = 'accept a mailbox of messages in mbox format')
@@ -186,7 +231,6 @@ def insert(args, prefix = 'gumdb'):
                         nargs = '+',
                         help = 'one or more files from which to read messages')
     insert_args = parser.parse_args(args.arguments)
-    print(repr(insert_args))
     conn = connect(str(args.database[0]))
     for path in insert_args.path:
         if insert_args.mbox:
@@ -216,10 +260,51 @@ def insert(args, prefix = 'gumdb'):
                                              mtime = os.path.getmtime(path)))
 
 
+def digestify(args, prefix = 'gumdb'):
+    """Add digests to messages that might be duplicates."""
+    parser = argparse.ArgumentParser(prog = prefix + ' digestify',
+                                     description = 'Add digests to messages that might be duplicates.')
+    digestify_args = parser.parse_args(args.arguments)
+    conn = connect(str(args.database[0]))
+    parser = email.parser.BytesParser(policy = email.policy.compat32)
+
+    # Find all messages with the same value in their Message-Id
+    # header.  DISTINCT is necesssary because there are messages with
+    # multiple identical Message-Id headers in my archive!  TODO: A
+    # message with two distinct Message-Id headers will be digested
+    # twice (with different results) and cause an insertion failure.
+    cursor = conn.execute('''
+        SELECT DISTINCT id, message
+        FROM (SELECT value
+              FROM headers
+              WHERE name = 'message-id'
+              GROUP BY value
+              HAVING count(*) > 1)
+        LEFT JOIN headers USING (value)
+        JOIN messages USING (id)
+        LEFT JOIN digests USING (id)
+        WHERE headers.name = 'message-id' AND
+              digests.digest IS NULL
+    ''')
+    for id, message_bytes in fetch(cursor):
+        message = parser.parsebytes(message_bytes)
+        digest = pyzor.digest.DataDigester(message).digest
+        # Pyzor's digest doesn't include Message-Ids.  We want to
+        # distinguish identical messages with different Message-Ids,
+        # so add them to the digest.
+        for message_id in message.get_all('message-id'):
+            digest.update(str(message_id).encode('utf-8'))
+        hex = digest.hexdigest()
+        logger.info('Adding digest for %s: %s', id, hex)
+        conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
+        conn.commit()
+
+
 def main():
     commands = {
         'help': lambda args, prefix = 'help': parser.print_help(),
-        'insert': insert
+        'insert': insert,
+        'digestify': digestify,
     }
     parser = argparse.ArgumentParser(description = 'Grand Unified Mail Database')
     default_database = pathlib.Path.home() / 'var/gumdb.sqlite3'
