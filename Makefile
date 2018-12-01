@@ -11,6 +11,8 @@ help:
 
 tools: tool/bin/pip
 	tool/bin/pip install -r requirements.pip
+	@echo 'To set up environment, run:'
+	@echo "    export PATH=\"$$(pwd)/tool/bin:\$$PATH\""
 
 tool/bin/pip:
 	virtualenv --python=$(PYTHON) tool
