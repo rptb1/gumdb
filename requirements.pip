@@ -1,0 +1,2 @@
+# requirements.pip -- packages required for GUMDB
+pyzor==1.0.0
