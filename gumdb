@@ -293,7 +293,7 @@ def digest_message(message):
     # Pyzor's digest doesn't include Message-Ids.  We want to
     # distinguish identical messages with different Message-Ids,
     # so add them to the digest.
-    for message_id in message.get_all('message-id'):
+    for message_id in message.get_all('message-id') or ():
         digest.update(str(message_id).encode('utf-8'))
     return digest.hexdigest()
 
