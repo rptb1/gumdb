@@ -39,6 +39,12 @@ logger.setLevel(logging.WARNING)
 logger.addHandler(logging.StreamHandler())
 
 
+# We'd like to use the "default" policy (which isn't the default)
+# and take advantage of its structured header classes, but
+# <https://bugs.python.org/issue35342> makes it unusable.
+email_parser = email.parser.BytesParser(policy = email.policy.compat32)
+
+
 def schema(conn):
     
     # Core schema
@@ -65,6 +71,13 @@ def schema(conn):
             key TEXT,
             mtime FLOAT
         )
+    ''')
+    # The sources_tkf index is important for checking whether a
+    # message has already been added, or has been added in an earlier
+    # version of a mailbox.
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS sources_tfk
+        ON sources (type, file, key)
     ''')
 
     # headers.id can't be a primary key because messages have more
@@ -177,11 +190,7 @@ def fetch(cursor):
 def insert_message(conn, message_bytes, source = None):
     """Insert a single message into the database."""
     
-    # We'd like to use the "default" policy (which isn't the default)
-    # and take advantage of its structured header classes, but
-    # <https://bugs.python.org/issue35342> makes it unusable.
-    parser = email.parser.BytesParser(policy = email.policy.compat32)
-    message = parser.parsebytes(message_bytes)
+    message = email_parser.parsebytes(message_bytes)
 
     logger.info('Adding message from %s date %s subject %s',
                 repr(str(message['from'])),
@@ -244,6 +253,38 @@ def insert_message(conn, message_bytes, source = None):
     conn.commit()
 
 
+def maybe_insert_message(conn, message_bytes, source = None):
+    """Insert a message into the database if we don't already have it from the same source."""
+    if source and 'file' in source and 'mtime' in source:
+        path = source['file']
+        key = source.get('key')
+        mtime = source['mtime']
+        cur = conn.execute("""
+            SELECT id, digest
+            FROM sources LEFT NATURAL JOIN digests
+            WHERE type = 'mbox' AND file = ? AND key = ? AND mtime = ?
+        """, (path, key, mtime))
+        digest = None
+        # There should only be zero or one pf these, but just in case...
+        for existing_id, existing_digest in fetch(cur):
+            logger.debug('Found existing source duplicate message %s from %s[%s] at %s', existing_id, path, key, mtime)
+            if not digest:
+                digest = digest_message(email_parser.parsebytes(message_bytes))
+            if not existing_digest:
+                existing_bytes = conn.execute("SELECT message FROM messages WHERE id = ?", (existing_id,)).fetchone()[0]
+                existing_message = email_parser.parsebytes(existing_bytes)
+                existing_digest = digest_message(existing_message)
+                logger.debug('Adding digest for existing message %s: %s', existing_id, existing_digest)
+                conn.execute("INSERT INTO digests (id, digest) VALUES (?, ?)", (existing_id, existing_digest))
+                conn.commit()
+            if digest != existing_digest:
+                logging.error('Existing source duplicate %s digest %s differs from new version %s.', existing_id, existing_digest, digest)
+            else:
+                return False
+    insert_message(conn, message_bytes, source = source)
+    return True
+    
+
 def insert(args, prefix = 'gumdb'):
     """Insert messages into the database from the command line."""
     parser = argparse.ArgumentParser(prog = prefix + ' insert',
@@ -266,13 +307,17 @@ def insert(args, prefix = 'gumdb'):
             # TODO: locking?
             mtime = os.path.getmtime(path)
             for key in box.iterkeys():
-                insert_message(conn,
-                               box.get_bytes(key, from_ = True),
-                               source = dict(type = 'mbox',
-                                             file = path,
-                                             key = key,
-                                             mtime = mtime))
-                if insert_args.dots: print('.', end = '', flush = True)
+                message_bytes = box.get_bytes(key, from_ = True)
+                if maybe_insert_message(conn,
+                                        message_bytes,
+                                        source = dict(type = 'mbox',
+                                                      file = path,
+                                                      key = key,
+                                                      mtime = mtime)):
+                    dot = '.'
+                else:
+                    dot = 'd'
+                if insert_args.dots: print(dot, end = '', flush = True)
             if insert_args.dots: print(flush = True)
         else:
             if path == '-':
@@ -281,11 +326,12 @@ def insert(args, prefix = 'gumdb'):
                                source = dict(type = 'file',
                                              mtime = time.time()))
             else:
-                insert_message(conn,
-                               open(path, 'rb').read(),
-                               source = dict(type = 'file',
-                                             file = path,
-                                             mtime = os.path.getmtime(path)))
+                maybe_insert_message(conn,
+                                     open(path, 'rb').read(),
+                                     source = dict(type = 'file',
+                                                   file = path,
+                                                   mtime = os.path.getmtime(path)))
+
 
 def digest_message(message):
     """Digest a message into a hex string that compares equal only for duplicate messages."""
