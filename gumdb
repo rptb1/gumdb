@@ -350,15 +350,29 @@ def insert(args, prefix = 'gumdb'):
                         help = 'one or more files from which to read messages')
     insert_args = parser.parse_args(args.arguments)
     conn = connect(str(args.database[0]))
-    for path in insert_args.path:
-        if path == '-':
-            mtime = time.time()
-        else:
-            mtime = os.path.getmtime(path)
-            if conn.execute("SELECT 1 FROM scans WHERE file = ? AND mtime = ?", (path, mtime)).fetchall():
-                logger.info('File %s already scanned.', path)
-                continue
 
+    # Gather up all the modification times of the arguments, then use
+    # a single query to determine which have been updated.  This is
+    # *much* faster than looping over the arguments and querying each
+    # one.
+    conn.execute("DROP TABLE IF EXISTS insertions")
+    conn.execute("""
+        CREATE TEMPORARY TABLE insertions (
+            file TEXT NOT NULL PRIMARY KEY,
+            mtime FLOAT NOT NULL
+        )
+    """)
+    conn.executemany("""
+        INSERT OR REPLACE INTO insertions (file, mtime) VALUES (?, ?)
+    """, [(path, os.path.getmtime(path) if path != '-' else time.time())
+          for path in insert_args.path
+          if path != '-'])
+    cur = conn.execute("""
+        SELECT insertions.file, insertions.mtime
+        FROM insertions LEFT JOIN scans USING (file, mtime)
+        WHERE scans.mtime IS NULL
+    """)
+    for path, mtime in fetch(cur):
         box = None
         if insert_args.mbox:
             type = 'mbox'
@@ -367,6 +381,7 @@ def insert(args, prefix = 'gumdb'):
 
         if box:
             # TODO: locking?
+            if insert_args.dots: print(path + ': ', end = '')
             for key in box.iterkeys():
                 message_bytes = box.get_bytes(key, from_ = True)
                 if maybe_insert_message(conn,
