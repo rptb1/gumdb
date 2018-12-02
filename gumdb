@@ -69,7 +69,8 @@ def schema(conn):
             type TEXT NOT NULL,
             file TEXT,
             key TEXT,
-            mtime FLOAT
+            mtime FLOAT,
+            UNIQUE (type, file, key, mtime)
         )
     ''')
     # The sources_tkf index is important for checking whether a
@@ -263,14 +264,15 @@ def insert_message(conn, message_bytes, source = None):
 def maybe_insert_message(conn, message_bytes, source = None):
     """Insert a message into the database if we don't already have it from the same source."""
     if source and 'file' in source and 'mtime' in source:
+        type = source['type']
         path = source['file']
         key = source.get('key')
         mtime = source['mtime']
         cur = conn.execute("""
             SELECT id, digest
             FROM sources LEFT NATURAL JOIN digests
-            WHERE type = 'mbox' AND file = ? AND key = ? AND mtime = ?
-        """, (path, key, mtime))
+            WHERE type = ? AND file = ? AND key = ? AND mtime = ?
+        """, (type, path, key, mtime))
         digest = None
         # There should only be zero or one pf these, but just in case...
         for existing_id, existing_digest in fetch(cur):
