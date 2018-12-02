@@ -23,6 +23,7 @@ import email
 import email.parser
 import email.policy
 import email.utils
+import hashlib
 import logging
 import mailbox
 import os.path
@@ -256,14 +257,9 @@ def insert_message(conn, message_bytes, source = None):
     if unixfrom:
         conn.execute('INSERT INTO envelopes (id, unixfrom) VALUES (?, ?)', (id, unixfrom))
 
-    try:
-        hex = digest_message(message)
-    except:
-        logger.error('Failed to digest message %s', id)
-        # TODO: Traceback
-    else:
-        logger.debug('%s digest: %s', id, hex)
-        conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
+    hex = digest_message(message, message_bytes)
+    logger.debug('%s digest: %s', id, hex)
+    conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
 
     conn.commit()
 
@@ -288,16 +284,19 @@ def maybe_insert_message(conn, message_bytes, source = None):
         for existing_id, existing_digest in fetch(cur):
             logger.debug('Found existing source duplicate message %s from %s[%s] at %s', existing_id, path, key, mtime)
             if not digest:
-                digest = digest_message(email_parser.parsebytes(message_bytes))
+                digest = digest_message(email_parser.parsebytes(message_bytes), message_bytes)
             if not existing_digest:
                 existing_bytes = conn.execute("SELECT message FROM messages WHERE id = ?", (existing_id,)).fetchone()[0]
                 existing_message = email_parser.parsebytes(existing_bytes)
-                existing_digest = digest_message(existing_message)
+                existing_digest = digest_message(existing_message, existing_bytes)
                 logger.debug('Adding digest for existing message %s: %s', existing_id, existing_digest)
                 conn.execute("INSERT INTO digests (id, digest) VALUES (?, ?)", (existing_id, existing_digest))
                 conn.commit()
             if digest != existing_digest:
-                logger.error('Existing source duplicate %s digest %s differs from new version %s.', existing_id, existing_digest, digest)
+                logger.error('Existing source duplicate %s digest %s '
+                             'differs from new version %s from %s[%s]',
+                             existing_id, existing_digest,
+                             digest, path, key)
             else:
                 return False
     insert_message(conn, message_bytes, source = source)
@@ -386,14 +385,24 @@ def insert(args, prefix = 'gumdb'):
         conn.commit()
 
 
-def digest_message(message):
+def digest_message(message, message_bytes):
     """Digest a message into a hex string that compares equal only for duplicate messages."""
-    digest = pyzor.digest.DataDigester(message).digest
-    # Pyzor's digest doesn't include Message-Ids.  We want to
-    # distinguish identical messages with different Message-Ids,
-    # so add them to the digest.
-    for message_id in message.get_all('message-id') or ():
-        digest.update(str(message_id).encode('utf-8'))
+    # Pyzor's digest does fail sometimes due to encoding and HTML
+    # format errors.  In that case, we make a digest of the message
+    # bytes.  It won't be as good at finding duplicates, but it will
+    # function.
+    try:
+        digest = pyzor.digest.DataDigester(message).digest
+    except:
+        # TODO: Warning in this case?
+        digest = hashlib.sha256()
+        digest.update(message_bytes)
+    else:
+        # Pyzor's digest doesn't include Message-Ids.  We want to
+        # distinguish identical messages with different Message-Ids,
+        # so add them to the digest.
+        for message_id in message.get_all('message-id') or ():
+            digest.update(str(message_id).encode('utf-8'))
     return digest.hexdigest()
 
     
@@ -414,18 +423,14 @@ def digestify(args, prefix = 'gumdb'):
             continue
         message_bytes, digest = row
         message = email_parser.parsebytes(message_bytes)
-        try:
-            hex = digest_message(message)
-        except:
-            logger.error('Failed to digest message %s', id)
+        hex = digest_message(message, message_bytes)
+        if digest:
+            if hex != digest:
+                logger.error('Replacing digest %s with %s for message %s', digest, hex, id)
         else:
-            if digest:
-                if hex != digest:
-                    logger.error('Replacing digest %s with %s for message %s', digest, hex, id)
-            else:
-                logger.info('Adding digest for %s: %s', id, hex)
-                conn.execute('INSERT OR REPLACE INTO digests (id, digest) VALUES (?, ?)', (id, hex))
-                conn.commit()
+            logger.info('Adding digest for %s: %s', id, hex)
+            conn.execute('INSERT OR REPLACE INTO digests (id, digest) VALUES (?, ?)', (id, hex))
+            conn.commit()
 
 
 def main():
