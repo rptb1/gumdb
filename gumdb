@@ -137,6 +137,8 @@ def schema(conn):
         ) WITHOUT ROWID
     ''')
 
+    # TODO: Scans should probably have a type, just to catch errors
+    # where a file is scanned as one type, then another.
     conn.execute('''
         CREATE TABLE IF NOT EXISTS scans (
             file TEXT NOT NULL,
@@ -268,6 +270,9 @@ def maybe_insert_message(conn, message_bytes, source = None):
         path = source['file']
         key = source.get('key')
         mtime = source['mtime']
+        # TODO: Consider loosening criteria to just type and path,
+        # then "stealing" the existing message from the other version
+        # of the file, reducing database and id churn.
         cur = conn.execute("""
             SELECT id, digest
             FROM sources LEFT NATURAL JOIN digests
@@ -311,57 +316,68 @@ def insert(args, prefix = 'gumdb'):
     insert_args = parser.parse_args(args.arguments)
     conn = connect(str(args.database[0]))
     for path in insert_args.path:
-        if insert_args.mbox:
+        if path == '-':
+            mtime = time.time()
+        else:
             mtime = os.path.getmtime(path)
             if conn.execute("SELECT 1 FROM scans WHERE file = ? AND mtime = ?", (path, mtime)).fetchall():
-                logger.info('Mailbox %s already up to date.', path)
-            else:
-                box = mailbox.mbox(path, create = False)
-                # TODO: locking?
-                for key in box.iterkeys():
-                    message_bytes = box.get_bytes(key, from_ = True)
-                    if maybe_insert_message(conn,
-                                            message_bytes,
-                                            source = dict(type = 'mbox',
-                                                          file = path,
-                                                          key = key,
-                                                          mtime = mtime)):
-                        dot = '.'
-                    else:
-                        dot = 'd'
-                    if insert_args.dots: print(dot, end = '', flush = True)
-                if insert_args.dots: print(flush = True)
-                conn.execute("INSERT INTO scans (file, mtime) VALUES (?, ?)", (path, mtime))
-                conn.commit()
-                # Delete messages that were in an earlier version of
-                # the mailbox that are in the new version.  Keep
-                # messages that aren't in the new version.  TODO:
-                # Explain why we keep them.
-                conn.execute("""
-                    DELETE FROM messages
-                    WHERE id IN (SELECT older_sources.id
-                                 FROM sources
-                                 JOIN digests USING (id)
-                                 LEFT JOIN digests AS other_digests USING (digest)
-                                 JOIN sources AS older_sources
-                                     ON older_sources.id = other_digests.id AND
-                                        older_sources.file = sources.file
-                                 WHERE sources.file = ? AND sources.mtime = ? AND
-                                       (older_sources.mtime IS NULL OR older_sources.mtime < sources.mtime))
-                """, (path, mtime))
-                conn.commit()
+                logger.info('File %s already scanned.', path)
+                continue
+
+        box = None
+        if insert_args.mbox:
+            type = 'mbox'
+            box = mailbox.mbox(path, create = False)
+        # TODO: Insert other kinds of mailbox here
+
+        if box:
+            # TODO: locking?
+            for key in box.iterkeys():
+                message_bytes = box.get_bytes(key, from_ = True)
+                if maybe_insert_message(conn,
+                                        message_bytes,
+                                        source = dict(type = type,
+                                                      file = path,
+                                                      key = key,
+                                                      mtime = mtime)):
+                    dot = '.'
+                else:
+                    dot = 'd'
+                if insert_args.dots: print(dot, end = '', flush = True)
+            if insert_args.dots: print(flush = True)
         else:
             if path == '-':
                 insert_message(conn,
                                sys.stdin.buffer.read(),
                                source = dict(type = 'file',
-                                             mtime = time.time()))
+                                             mtime = mtime))
             else:
                 maybe_insert_message(conn,
                                      open(path, 'rb').read(),
                                      source = dict(type = 'file',
                                                    file = path,
-                                                   mtime = os.path.getmtime(path)))
+                                                   mtime = mtime))
+
+        conn.execute("INSERT INTO scans (file, mtime) VALUES (?, ?)", (path, mtime))
+        conn.commit()
+
+        # Delete messages that were in an earlier version of
+        # the mailbox that are in the new version.  Keep
+        # messages that aren't in the new version.  TODO:
+        # Explain why we keep them.
+        conn.execute("""
+            DELETE FROM messages
+            WHERE id IN (SELECT older_sources.id
+                         FROM sources
+                         JOIN digests USING (id)
+                         LEFT JOIN digests AS other_digests USING (digest)
+                         JOIN sources AS older_sources
+                             ON older_sources.id = other_digests.id AND
+                                older_sources.file = sources.file
+                         WHERE sources.file = ? AND sources.mtime = ? AND
+                               (older_sources.mtime IS NULL OR older_sources.mtime < sources.mtime))
+        """, (path, mtime))
+        conn.commit()
 
 
 def digest_message(message):
