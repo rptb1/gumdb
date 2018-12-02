@@ -271,9 +271,9 @@ def maybe_insert_message(conn, message_bytes, source = None):
         path = source['file']
         key = source.get('key')
         mtime = source['mtime']
-        # TODO: Consider loosening criteria to just type and path,
-        # then "stealing" the existing message from the other version
-        # of the file, reducing database and id churn.
+
+        # Have we scanned this particular source before?  If so, just
+        # check that the previous insert was valid and skip this one.
         cur = conn.execute("""
             SELECT id, digest
             FROM sources LEFT NATURAL JOIN digests
@@ -299,6 +299,37 @@ def maybe_insert_message(conn, message_bytes, source = None):
                              digest, path, key)
             else:
                 return False
+
+        # Look for this message in an older version of this file, and
+        # just update it, instead of inserting it again, for
+        # efficiency and to reduce database and id churn.
+        if not digest:
+            digest = digest_message(email_parser.parsebytes(message_bytes), message_bytes)
+        row = conn.execute("""
+            SELECT id, key, mtime
+            FROM sources NATURAL JOIN digests
+            WHERE type = ? AND file = ? AND mtime <> ? AND digest = ?
+        """, (type, path, mtime, digest)).fetchone()
+        if row:
+            id, existing_key, existing_mtime = row
+            logger.debug('Updating matching message %s from '
+                         '%s[%s] at %s to %s[%s] at %s.',
+                         id, path, existing_key, existing_mtime,
+                         path, key, mtime)
+            count = conn.execute("""
+                UPDATE sources SET key = ?, mtime = ? WHERE id = ?
+            """, (key, mtime, id)).rowcount
+            conn.commit()
+            logger.debug('Rowcount = %d', count)
+            if count == 1:
+                return False
+            assert count == 0 # Table constraints
+            logger.debug('Failed to update matching message %s from '
+                         '%s[%s] at %s to %s[%s] at %s.',
+                         id, path, existing_key, existing_mtime,
+                         path, key, mtime)
+            # Fall through and insert a new copy.
+                         
     insert_message(conn, message_bytes, source = source)
     return True
     
