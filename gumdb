@@ -256,9 +256,14 @@ def insert_message(conn, message_bytes, source = None):
     if unixfrom:
         conn.execute('INSERT INTO envelopes (id, unixfrom) VALUES (?, ?)', (id, unixfrom))
 
-    hex = digest_message(message)
-    logger.debug('%s digest: %s', id, hex)
-    conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
+    try:
+        hex = digest_message(message)
+    except:
+        logger.error('Failed to digest message %s', id)
+        # TODO: Traceback
+    else:
+        logger.debug('%s digest: %s', id, hex)
+        conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
 
     conn.commit()
 
@@ -392,37 +397,30 @@ def digest_message(message):
 
     
 def digestify(args, prefix = 'gumdb'):
-    """Add digests to messages that might be duplicates."""
+    """Add digests to messages."""
     parser = argparse.ArgumentParser(prog = prefix + ' digestify',
                                      description = 'Add digests to messages that might be duplicates.')
+    parser.add_argument('id',
+                        nargs = '+',
+                        help = 'GUMDB id of messages to digest')
     digestify_args = parser.parse_args(args.arguments)
     conn = connect(str(args.database[0]))
-    parser = email.parser.BytesParser(policy = email.policy.compat32)
 
-    # Find all messages with the same value in their Message-Id
-    # header.  DISTINCT is necesssary because there are messages with
-    # multiple identical Message-Id headers in my archive!  TODO: A
-    # message with two distinct Message-Id headers will be digested
-    # twice (with different results) and cause an insertion failure.
-    cursor = conn.execute('''
-        SELECT DISTINCT id, message
-        FROM (SELECT value
-              FROM headers
-              WHERE name = 'message-id'
-              GROUP BY value
-              HAVING count(*) > 1)
-        LEFT JOIN headers USING (value)
-        JOIN messages USING (id)
-        LEFT JOIN digests USING (id)
-        WHERE headers.name = 'message-id' AND
-              digests.digest IS NULL
-    ''')
-    for id, message_bytes in fetch(cursor):
-        message = parser.parsebytes(message_bytes)
-        hex = digest_message(message)
-        logger.info('Adding digest for %s: %s', id, hex)
-        conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
-        conn.commit()
+    for id in digestify_args.id:
+        row = conn.execute("SELECT message FROM messages WHERE id = ?", (id,)).fetchone()
+        if not row:
+            logger.error('No message with id %s', id)
+            continue
+        message_bytes = row[0]
+        message = email_parser.parsebytes(message_bytes)
+        try:
+            hex = digest_message(message)
+        except:
+            logger.error('Failed to digest message %s', id)
+        else:
+            logger.info('Adding digest for %s: %s', id, hex)
+            conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
+            conn.commit()
 
 
 def main():
