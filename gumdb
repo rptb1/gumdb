@@ -370,7 +370,7 @@ def insert(args, prefix = 'gumdb'):
         # the mailbox that are in the new version.  Keep
         # messages that aren't in the new version.  TODO:
         # Explain why we keep them.
-        conn.execute("""
+        count = conn.execute("""
             DELETE FROM messages
             WHERE id IN (SELECT older_sources.id
                          FROM sources
@@ -381,7 +381,8 @@ def insert(args, prefix = 'gumdb'):
                                 older_sources.file = sources.file
                          WHERE sources.file = ? AND sources.mtime = ? AND
                                (older_sources.mtime IS NULL OR older_sources.mtime < sources.mtime))
-        """, (path, mtime))
+        """, (path, mtime)).rowcount
+        logger.info('Deleted %d messages from earlier versions of %s', count, path)
         conn.commit()
 
 
@@ -407,20 +408,24 @@ def digestify(args, prefix = 'gumdb'):
     conn = connect(str(args.database[0]))
 
     for id in digestify_args.id:
-        row = conn.execute("SELECT message FROM messages WHERE id = ?", (id,)).fetchone()
+        row = conn.execute("SELECT message, digest FROM messages NATURAL LEFT JOIN digests WHERE id = ?", (id,)).fetchone()
         if not row:
             logger.error('No message with id %s', id)
             continue
-        message_bytes = row[0]
+        message_bytes, digest = row
         message = email_parser.parsebytes(message_bytes)
         try:
             hex = digest_message(message)
         except:
             logger.error('Failed to digest message %s', id)
         else:
-            logger.info('Adding digest for %s: %s', id, hex)
-            conn.execute('INSERT INTO digests (id, digest) VALUES (?, ?)', (id, hex))
-            conn.commit()
+            if digest:
+                if hex != digest:
+                    logger.error('Replacing digest %s with %s for message %s', digest, hex, id)
+            else:
+                logger.info('Adding digest for %s: %s', id, hex)
+                conn.execute('INSERT OR REPLACE INTO digests (id, digest) VALUES (?, ?)', (id, hex))
+                conn.commit()
 
 
 def main():
