@@ -47,9 +47,9 @@ email_parser = email.parser.BytesParser(policy = email.policy.compat32)
 
 
 def schema(conn):
-    
+
     # Core schema
-    
+
     # WITHOUT ROWID is possible for the messages table, but not
     # recommended because it has large rows.  See
     # <https://sqlite.org/withoutrowid.html>.
@@ -200,7 +200,7 @@ def fetch(cursor):
 
 def insert_message(conn, message_bytes, source = None):
     """Insert a single message into the database."""
-    
+
     message = email_parser.parsebytes(message_bytes)
 
     logger.info('Adding message from %s date %s subject %s',
@@ -329,10 +329,10 @@ def maybe_insert_message(conn, message_bytes, source = None):
                          id, path, existing_key, existing_mtime,
                          path, key, mtime)
             # Fall through and insert a new copy.
-                         
+
     insert_message(conn, message_bytes, source = source)
     return True
-    
+
 
 def insert(args, prefix = 'gumdb'):
     """Insert messages into the database from the command line."""
@@ -379,7 +379,8 @@ def insert(args, prefix = 'gumdb'):
             box = mailbox.mbox(path, create = False)
         # TODO: Insert other kinds of mailbox here
 
-        if box:
+        # Careful: empty mailboxes test false.
+        if box != None:
             # TODO: locking?
             if insert_args.dots: print(path + ': ', end = '')
             for key in box.iterkeys():
@@ -445,13 +446,13 @@ def digest_message(message, message_bytes):
         digest.update(message_bytes)
     else:
         # Pyzor's digest doesn't include Message-Ids.  We want to
-        # distinguish identical messages with different Message-Ids,
-        # so add them to the digest.
+        # distinguish identical messages with different Message-Ids.
+        # So add any Message-Ids to the digest.
         for message_id in message.get_all('message-id') or ():
             digest.update(str(message_id).encode('utf-8'))
     return digest.hexdigest()
 
-    
+
 def digestify(args, prefix = 'gumdb'):
     """Add digests to messages."""
     parser = argparse.ArgumentParser(prog = prefix + ' digestify',
@@ -462,6 +463,7 @@ def digestify(args, prefix = 'gumdb'):
     digestify_args = parser.parse_args(args.arguments)
     conn = connect(str(args.database[0]))
 
+    # TODO: Lift the SELECT out of this loop.
     for id in digestify_args.id:
         row = conn.execute("SELECT message, digest FROM messages NATURAL LEFT JOIN digests WHERE id = ?", (id,)).fetchone()
         if not row:
@@ -510,6 +512,9 @@ def main():
     if args.debug:
         logger.setLevel(logging.DEBUG)
     logger.debug('Debug logging enabled')
+    # Extract the short description of the command and general options
+    # so that each command can display them.  Unfortunately, the
+    # argparse module hides the logic for creating this string.
     prefix = re.sub(r'(?ims)\Ausage: (.*?) <command>.*\Z', r'\1', parser.format_usage())
     try:
         commands[args.command](args, prefix = prefix)
